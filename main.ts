@@ -1,12 +1,6 @@
-// tiny-stack-vm: a tiny stack virtual machine for make.fun's tiny-stack-vm-01.
-// ISA v1 (see kit program/generator/subject/ISA.md): 32-bit wrapping integers,
-// a 256-value data stack, a 64-deep call stack, 256 words of memory, byte
-// input/output, ten traps, a 1,000,000-step limit and a 65,536-byte output cap.
-//
-// One run answers every instance in /input (or MAKEFUN_INPUT_DIR): for each
-// <id> it runs /input/<id>/program.bin on /input/<id>/input.bin and writes
-// /output/<id>/stdout.bin (the exact bytes the program wrote) and
-// /output/<id>/exit.txt (its exit code, 0-255).
+// tiny-stack-vm: a VM for make.fun's tiny-stack-vm-01 (ISA v1). One run answers
+// every instance in /input: runs program.bin on input.bin, writes stdout.bin
+// (the exact bytes written) and exit.txt (exit code 0-255) under /output/<id>.
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -23,6 +17,7 @@ function run(prog, input) {
   const mem = new Int32Array(256);
   const out = []; // output bytes, as numbers 0-255
   const done = (code) => [Buffer.from(out), code];
+  const room = (k) => out.length + k <= MAXOUT; // output fits k more bytes
   let pc = 0, sp = 0, cp = 0, ip = 0, steps = 0;
   for (;;) {
     // Step order (ISA "One step"): step limit first, then pc range,
@@ -32,241 +27,42 @@ function run(prog, input) {
     const op = prog[pc];
     switch (op) {
       case 0x00: return done(0); // HALT
-      case 0x01: { // PUSH8: 1-byte immediate, sign-extended
-        if (pc + 2 > n) return done(9);
-        if (sp === 256) return done(3);
-        const v = prog[pc + 1];
-        st[sp++] = v < 128 ? v : v - 256;
-        pc += 2;
-        break;
-      }
-      case 0x02: { // PUSH32: 4-byte little-endian immediate
-        if (pc + 5 > n) return done(9);
-        if (sp === 256) return done(3);
-        st[sp++] = prog[pc + 1] | (prog[pc + 2] << 8) | (prog[pc + 3] << 16) | (prog[pc + 4] << 24);
-        pc += 5;
-        break;
-      }
-      case 0x03: // POP
-        if (sp < 1) return done(2);
-        sp--;
-        pc++;
-        break;
-      case 0x04: // DUP
-        if (sp < 1) return done(2);
-        if (sp === 256) return done(3);
-        st[sp] = st[sp - 1];
-        sp++;
-        pc++;
-        break;
-      case 0x05: { // SWAP
-        if (sp < 2) return done(2);
-        const t = st[sp - 1];
-        st[sp - 1] = st[sp - 2];
-        st[sp - 2] = t;
-        pc++;
-        break;
-      }
-      case 0x06: // OVER
-        if (sp < 2) return done(2);
-        if (sp === 256) return done(3);
-        st[sp] = st[sp - 2];
-        sp++;
-        pc++;
-        break;
-      case 0x07: { // ROT: (a b c -- b c a)
-        if (sp < 3) return done(2);
-        const a = st[sp - 3];
-        st[sp - 3] = st[sp - 2];
-        st[sp - 2] = st[sp - 1];
-        st[sp - 1] = a;
-        pc++;
-        break;
-      }
-      case 0x10: { // ADD, wraps
-        if (sp < 2) return done(2);
-        const b = st[--sp];
-        st[sp - 1] = (st[sp - 1] + b) | 0;
-        pc++;
-        break;
-      }
-      case 0x11: { // SUB, wraps
-        if (sp < 2) return done(2);
-        const b = st[--sp];
-        st[sp - 1] = (st[sp - 1] - b) | 0;
-        pc++;
-        break;
-      }
-      case 0x12: { // MUL, low 32 bits of the exact product
-        if (sp < 2) return done(2);
-        const b = st[--sp];
-        st[sp - 1] = Math.imul(st[sp - 1], b);
-        pc++;
-        break;
-      }
-      case 0x13: { // DIV, signed, truncated toward zero
-        if (sp < 2) return done(2);
-        const b = st[--sp];
-        const a = st[sp - 1];
-        if (b === 0) return done(4);
-        st[sp - 1] = (a / b) | 0; // -2147483648 / -1 wraps to -2147483648
-        pc++;
-        break;
-      }
-      case 0x14: { // MOD, signed remainder, sign of a
-        if (sp < 2) return done(2);
-        const b = st[--sp];
-        const a = st[sp - 1];
-        if (b === 0) return done(4);
-        st[sp - 1] = a % b; // x % -1 is 0, as in JS
-        pc++;
-        break;
-      }
-      case 0x15: { // DIVU, unsigned quotient read back as signed
-        if (sp < 2) return done(2);
-        const b = st[--sp];
-        const a = st[sp - 1];
-        if (b === 0) return done(4);
-        st[sp - 1] = ((a >>> 0) / (b >>> 0)) | 0;
-        pc++;
-        break;
-      }
-      case 0x16: { // MODU, unsigned remainder read back as signed
-        if (sp < 2) return done(2);
-        const b = st[--sp];
-        const a = st[sp - 1];
-        if (b === 0) return done(4);
-        st[sp - 1] = ((a >>> 0) % (b >>> 0)) | 0;
-        pc++;
-        break;
-      }
-      case 0x17: // NEG, wraps
-        if (sp < 1) return done(2);
-        st[sp - 1] = (-st[sp - 1]) | 0;
-        pc++;
-        break;
-      case 0x18: { // AND
-        if (sp < 2) return done(2);
-        const b = st[--sp];
-        st[sp - 1] = st[sp - 1] & b;
-        pc++;
-        break;
-      }
-      case 0x19: { // OR
-        if (sp < 2) return done(2);
-        const b = st[--sp];
-        st[sp - 1] = st[sp - 1] | b;
-        pc++;
-        break;
-      }
-      case 0x1a: { // XOR
-        if (sp < 2) return done(2);
-        const b = st[--sp];
-        st[sp - 1] = st[sp - 1] ^ b;
-        pc++;
-        break;
-      }
-      case 0x1b: // NOT
-        if (sp < 1) return done(2);
-        st[sp - 1] = ~st[sp - 1];
-        pc++;
-        break;
-      case 0x1c: { // SHL: only the low 5 bits of the count matter
-        if (sp < 2) return done(2);
-        const b = st[--sp];
-        st[sp - 1] = st[sp - 1] << b;
-        pc++;
-        break;
-      }
-      case 0x1d: { // SHR: arithmetic, sign bit copied in
-        if (sp < 2) return done(2);
-        const b = st[--sp];
-        st[sp - 1] = st[sp - 1] >> b;
-        pc++;
-        break;
-      }
-      case 0x1e: { // SHRU: logical, zeros in, read back as signed
-        if (sp < 2) return done(2);
-        const b = st[--sp];
-        st[sp - 1] = (st[sp - 1] >>> b) | 0;
-        pc++;
-        break;
-      }
-      case 0x20: { // EQ
-        if (sp < 2) return done(2);
-        const b = st[--sp];
-        st[sp - 1] = st[sp - 1] === b ? 1 : 0;
-        pc++;
-        break;
-      }
-      case 0x21: { // LT, signed
-        if (sp < 2) return done(2);
-        const b = st[--sp];
-        st[sp - 1] = st[sp - 1] < b ? 1 : 0;
-        pc++;
-        break;
-      }
-      case 0x22: { // LTU, unsigned
-        if (sp < 2) return done(2);
-        const b = st[--sp];
-        st[sp - 1] = (st[sp - 1] >>> 0) < (b >>> 0) ? 1 : 0;
-        pc++;
-        break;
-      }
-      case 0x30: { // JMP: pc = (next instruction) + signed offset
-        if (pc + 3 > n) return done(9);
-        const off = (prog[pc + 1] | (prog[pc + 2] << 8)) << 16 >> 16;
-        pc = pc + 3 + off;
-        break;
-      }
-      case 0x31: { // JZ: jump as JMP if v = 0
-        if (pc + 3 > n) return done(9);
-        if (sp < 1) return done(2);
-        const off = (prog[pc + 1] | (prog[pc + 2] << 8)) << 16 >> 16;
-        const v = st[--sp];
-        pc = v === 0 ? pc + 3 + off : pc + 3;
-        break;
-      }
-      case 0x32: { // JNZ: jump as JMP if v is not 0
-        if (pc + 3 > n) return done(9);
-        if (sp < 1) return done(2);
-        const off = (prog[pc + 1] | (prog[pc + 2] << 8)) << 16 >> 16;
-        const v = st[--sp];
-        pc = v !== 0 ? pc + 3 + off : pc + 3;
-        break;
-      }
-      case 0x33: { // CALL: 2-byte unsigned target, push next address
-        if (pc + 3 > n) return done(9);
-        if (cp === 64) return done(7);
-        cs[cp++] = pc + 3;
-        pc = prog[pc + 1] | (prog[pc + 2] << 8);
-        break;
-      }
-      case 0x34: // RET
-        if (cp === 0) return done(8);
-        pc = cs[--cp];
-        break;
-      case 0x40: { // LOAD
-        if (sp < 1) return done(2);
-        const addr = st[sp - 1];
-        if (addr < 0 || addr > 255) return done(6);
-        st[sp - 1] = mem[addr];
-        pc++;
-        break;
-      }
-      case 0x41: { // STORE: (v addr --)
-        if (sp < 2) return done(2);
-        const addr = st[--sp];
-        const v = st[--sp];
-        if (addr < 0 || addr > 255) return done(6);
-        mem[addr] = v;
-        pc++;
-        break;
-      }
+      case 0x01: if (pc + 2 > n) return done(9); if (sp === 256) return done(3); st[sp++] = (prog[pc + 1] << 24) >> 24; pc += 2; break; // PUSH8, sign-extended
+      case 0x02: if (pc + 5 > n) return done(9); if (sp === 256) return done(3); st[sp++] = prog[pc + 1] | (prog[pc + 2] << 8) | (prog[pc + 3] << 16) | (prog[pc + 4] << 24); pc += 5; break; // PUSH32
+      case 0x03: if (sp < 1) return done(2); sp--; pc++; break; // POP
+      case 0x04: if (sp < 1) return done(2); if (sp === 256) return done(3); st[sp] = st[sp - 1]; sp++; pc++; break; // DUP
+      case 0x05: if (sp < 2) return done(2); { const t = st[sp - 1]; st[sp - 1] = st[sp - 2]; st[sp - 2] = t; } pc++; break; // SWAP
+      case 0x06: if (sp < 2) return done(2); if (sp === 256) return done(3); st[sp] = st[sp - 2]; sp++; pc++; break; // OVER
+      case 0x07: if (sp < 3) return done(2); { const a = st[sp - 3]; st[sp - 3] = st[sp - 2]; st[sp - 2] = st[sp - 1]; st[sp - 1] = a; } pc++; break; // ROT
+      case 0x10: if (sp < 2) return done(2); st[sp - 2] = (st[sp - 2] + st[sp - 1]) | 0; sp--; pc++; break; // ADD
+      case 0x11: if (sp < 2) return done(2); st[sp - 2] = (st[sp - 2] - st[sp - 1]) | 0; sp--; pc++; break; // SUB
+      case 0x12: if (sp < 2) return done(2); st[sp - 2] = Math.imul(st[sp - 2], st[sp - 1]); sp--; pc++; break; // MUL
+      case 0x13: if (sp < 2) return done(2); if (!st[sp - 1]) return done(4); st[sp - 2] = (st[sp - 2] / st[sp - 1]) | 0; sp--; pc++; break; // DIV
+      case 0x14: if (sp < 2) return done(2); if (!st[sp - 1]) return done(4); st[sp - 2] = st[sp - 2] % st[sp - 1]; sp--; pc++; break; // MOD
+      case 0x15: if (sp < 2) return done(2); if (!st[sp - 1]) return done(4); st[sp - 2] = ((st[sp - 2] >>> 0) / (st[sp - 1] >>> 0)) | 0; sp--; pc++; break; // DIVU
+      case 0x16: if (sp < 2) return done(2); if (!st[sp - 1]) return done(4); st[sp - 2] = ((st[sp - 2] >>> 0) % (st[sp - 1] >>> 0)) | 0; sp--; pc++; break; // MODU
+      case 0x17: if (sp < 1) return done(2); st[sp - 1] = (-st[sp - 1]) | 0; pc++; break; // NEG
+      case 0x18: if (sp < 2) return done(2); st[sp - 2] = st[sp - 2] & st[sp - 1]; sp--; pc++; break; // AND
+      case 0x19: if (sp < 2) return done(2); st[sp - 2] = st[sp - 2] | st[sp - 1]; sp--; pc++; break; // OR
+      case 0x1a: if (sp < 2) return done(2); st[sp - 2] = st[sp - 2] ^ st[sp - 1]; sp--; pc++; break; // XOR
+      case 0x1b: if (sp < 1) return done(2); st[sp - 1] = ~st[sp - 1]; pc++; break; // NOT
+      case 0x1c: if (sp < 2) return done(2); st[sp - 2] = st[sp - 2] << st[sp - 1]; sp--; pc++; break; // SHL
+      case 0x1d: if (sp < 2) return done(2); st[sp - 2] = st[sp - 2] >> st[sp - 1]; sp--; pc++; break; // SHR
+      case 0x1e: if (sp < 2) return done(2); st[sp - 2] = (st[sp - 2] >>> st[sp - 1]) | 0; sp--; pc++; break; // SHRU
+      case 0x20: if (sp < 2) return done(2); st[sp - 2] = st[sp - 2] === st[sp - 1] ? 1 : 0; sp--; pc++; break; // EQ
+      case 0x21: if (sp < 2) return done(2); st[sp - 2] = st[sp - 2] < st[sp - 1] ? 1 : 0; sp--; pc++; break; // LT
+      case 0x22: if (sp < 2) return done(2); st[sp - 2] = (st[sp - 2] >>> 0) < (st[sp - 1] >>> 0) ? 1 : 0; sp--; pc++; break; // LTU
+      case 0x30: if (pc + 3 > n) return done(9); pc += 3 + ((prog[pc + 1] | (prog[pc + 2] << 8)) << 16 >> 16); break; // JMP
+      case 0x31: if (pc + 3 > n) return done(9); if (sp < 1) return done(2); { const o = ((prog[pc + 1] | (prog[pc + 2] << 8)) << 16 >> 16); pc = st[--sp] === 0 ? pc + 3 + o : pc + 3; } break; // JZ
+      case 0x32: if (pc + 3 > n) return done(9); if (sp < 1) return done(2); { const o = ((prog[pc + 1] | (prog[pc + 2] << 8)) << 16 >> 16); pc = st[--sp] !== 0 ? pc + 3 + o : pc + 3; } break; // JNZ
+      case 0x33: if (pc + 3 > n) return done(9); if (cp === 64) return done(7); cs[cp++] = pc + 3; pc = prog[pc + 1] | (prog[pc + 2] << 8); break; // CALL
+      case 0x34: if (cp === 0) return done(8); pc = cs[--cp]; break; // RET
+      case 0x40: if (sp < 1) return done(2); { const a = st[sp - 1]; if (a < 0 || a > 255) return done(6); st[sp - 1] = mem[a]; } pc++; break; // LOAD
+      case 0x41: if (sp < 2) return done(2); { const a = st[--sp]; const v = st[--sp]; if (a < 0 || a > 255) return done(6); mem[a] = v; } pc++; break; // STORE
       case 0x50: { // PRINT: decimal ASCII, no newline
         if (sp < 1) return done(2);
         const s = String(st[--sp]);
-        if (out.length + s.length > MAXOUT) return done(11);
+        if (!room(s.length)) return done(11);
         for (let i = 0; i < s.length; i++) out.push(s.charCodeAt(i));
         pc++;
         break;
@@ -274,20 +70,13 @@ function run(prog, input) {
       case 0x51: { // PUTC: one byte, v AND 255
         if (sp < 1) return done(2);
         const v = st[--sp];
-        if (out.length + 1 > MAXOUT) return done(11);
+        if (!room(1)) return done(11);
         out.push(v & 255);
         pc++;
         break;
       }
-      case 0x52: // IN: next input byte, or -1 once used up
-        if (sp === 256) return done(3);
-        st[sp++] = ip < input.length ? input[ip++] : -1;
-        pc++;
-        break;
-      case 0x53: { // EXIT: code v AND 255
-        if (sp < 1) return done(2);
-        return done(st[--sp] & 255);
-      }
+      case 0x52: if (sp === 256) return done(3); st[sp++] = ip < input.length ? input[ip++] : -1; pc++; break; // IN
+      case 0x53: if (sp < 1) return done(2); return done(st[--sp] & 255); // EXIT
       default: return done(5); // unknown opcode
     }
     steps++;
